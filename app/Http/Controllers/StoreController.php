@@ -3,13 +3,24 @@
 namespace App\Http\Controllers;
 
 use App\Models\ProductCategory;
+use App\Models\Order;
+use App\Models\OrderDetail;
 use App\Models\Product;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Auth;
+
 
 
 class StoreController extends Controller
 {
     public function update_product(Request $request, $product_id){
+
+        if(!Gate::allows('edit-product')){
+            abort(403, 'Unauthorized');
+        }
         // Validate the incoming request data
         $request->validate([
             'name' => 'required|string|max:255',
@@ -62,6 +73,9 @@ class StoreController extends Controller
         ]);
     }
     public function delete_product($product_id){
+        if(!Gate::allows('delete-product')){
+            abort(403, 'Unauthorized');
+        }
         $product = Product::findOrFail($product_id);
         $product->delete();
         return redirect()->route('store')->with('success', 'Product deleted successfully!');
@@ -77,6 +91,10 @@ class StoreController extends Controller
             ]);
     }
     public function insert_product(Request $request){
+
+        if(!Gate::allows('insert-product')){
+            abort(403, 'Unauthorized');
+        }
 
         $request->validate([
             'name' => 'required|string|max:255',
@@ -114,5 +132,113 @@ class StoreController extends Controller
         #save the produt to database
         $product->save();
         return redirect()->route('store')->with('success', 'Product inserted successfully!');
+    }
+    public function add_to_cart(Request $request, $product_id){
+        $product = Product::findOrFail($product_id);
+        $quantity = $request->input('quantity', 1);
+ 
+        if ($quantity < 1) {
+            return redirect()->route('store')->with('error', 'Quantity must be at least 1.');
+        }
+ 
+        $cart = session()->get('cart', []);
+        
+        $existingQuantity = isset($cart[$product_id]) ? $cart[$product_id]['quantity'] : 0;
+        $totalQuantity = $existingQuantity + $quantity;
+ 
+        if ($totalQuantity > $product->stock) {
+            return redirect()->route('store')->with('error', 'Requested total quantity exceeds available stock.');
+        }
+ 
+        if (isset($cart[$product_id])) {
+            $cart[$product_id]['quantity'] = $totalQuantity;
+        } else {
+            $cart[$product_id] = [
+                'name' => $product->name,
+                'price' => $product->price,
+                'quantity' => $quantity,
+            ];
+        }
+        
+        session()->put('cart', $cart);
+ 
+        return redirect()->route('store')->with('success', 'Product added to cart successfully!');
+    }
+    public function view_cart(){
+        $cart = session()->get('cart', []);
+        return view('store.cart', compact('cart'));
+    }
+    public function remove_from_cart($product_id){
+        $cart = session()->get('cart', []);
+        
+        if (isset($cart[$product_id])) {
+            unset($cart[$product_id]);
+            session()->put('cart', $cart);
+        }
+ 
+        return redirect()->back()->with('success', 'Item removed from cart.');
+    }
+    public function update_cart(Request $request, $product_id){
+        $quantity = (int) $request->input('quantity');
+ 
+        if ($quantity < 1) {
+            return $this->remove_from_cart($product_id);
+        }
+ 
+        $product = Product::findOrFail($product_id);
+ 
+        if ($quantity > $product->stock) {
+            return redirect()->back()->with('error', 'Requested quantity exceeds available stock.');
+        }
+ 
+        $cart = session()->get('cart', []);
+        if (isset($cart[$product_id])) {
+            $cart[$product_id]['quantity'] = $quantity;
+            session()->put('cart', $cart);
+        }
+ 
+        return redirect()->back()->with('success', 'Cart updated successfully.');
+    }
+    public function checkout(Request $request){
+        $cart = session('cart', []);
+ 
+        if (empty($cart)) {
+            return redirect()->back()->with('error', 'Your cart is empty!');
+        }
+ 
+        DB::beginTransaction();
+        try {
+            $totalPrice = collect($cart)->sum(fn($item) => $item['price'] * $item['quantity']);
+ 
+            $order = Order::create([
+                'invoice_number' => 'INV-' . date('Ymd') . '-' . strtoupper(Str::random(6)),
+                'user_id' => Auth::id(),
+                'customer_name' => Auth::user()->name,
+                'total_price' => $totalPrice,
+                'status' => 'pending',
+                'payment_url' => null,
+                'paid_at' => null,
+            ]);
+ 
+            foreach ($cart as $product_id => $item) {
+                OrderDetail::create([
+                    'order_id' => $order->id,
+                    'product_id' => $product_id,
+                    'product_name' => $item['name'],
+                    'quantity' => $item['quantity'],
+                    'price' => $item['price'],
+                    'subtotal' => $item['price'] * $item['quantity'],
+                ]);
+            }
+            
+            DB::commit();
+ 
+            session()->forget('cart'); // Clear cart
+ 
+            return redirect()->route('store')->with('success', 'Checkout successful! Thank you for your purchase.');
+		} catch (\Exception $e) {
+            DB::rollBack();
+            return redirect()->back()->with('error', 'Checkout failed: ' . $e->getMessage());
+        }
     }
 }
